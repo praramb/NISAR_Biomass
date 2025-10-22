@@ -23,6 +23,7 @@ Repository for L3 science products for the Ecosystems Biomass workflow.
    ```
 4) Run the notebooks
    ```
+   python -m ipykernel install --user --name=NISAR_Biomass
    jupyter notebook
    ```
 test
