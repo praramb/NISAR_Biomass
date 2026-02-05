@@ -2,6 +2,7 @@ name: NISAR_Biomass
 channels:
   - conda-forge
 dependencies:
+  - rasterio
   - numpy
   - matplotlib
   - gdal
@@ -9,7 +10,6 @@ dependencies:
   - pandas
   - scikit-learn
   - ipywidgets
-  - rasterio
   - h5py
   - earthaccess
   - pyproj
@@ -23,3 +23,5 @@ dependencies:
   - notebook
   - nb_conda_kernels  
   - pre-commit  
+  - plotly
+  - seaborn
