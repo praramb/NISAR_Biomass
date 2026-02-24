@@ -25,6 +25,7 @@ import scipy
 import concurrent.futures
 from scipy.optimize import differential_evolution, minimize, shgo, dual_annealing
 import seaborn as sns
+from scipy.ndimage import generic_filter
 
 def calculate_density(x, y):
     # Calculate the point density
@@ -33,13 +34,32 @@ def calculate_density(x, y):
     density = kde(xy)
     return density
 
+def adaptive_smooth(image, thresh_sigma=2.0):
+    """
+    Only smooths pixels that are more than 2 sigma away from their 3x3 neighborhood.
+    This preserves forest edges while removing 'salt and pepper' speckle.
+    """
+    def filter_func(window):
+        center = window[len(window)//2]
+        neighborhood = np.delete(window, len(window)//2)
+        mean = np.mean(neighborhood)
+        std = np.std(neighborhood)
+        
+        # If the pixel is a statistical outlier, replace it with the neighborhood mean
+        if abs(center - mean) > (thresh_sigma * std):
+            return mean
+        return center
+
+    return generic_filter(image, filter_func, size=3)
+
+
 def plot_nisar_curve(X, W0, OUT_PREFIX, param0, X_RANGE):
     import math
     W = np.arange(0, 50 * math.ceil(W0.max() / 50), 1)
     
     
     plt.rcParams['font.family'] = 'serif'  # SET DEFAULT FONT FAMILY FOR FIGURE 
-    plt.rcParams['font.serif'] = ['Times New Roman']  # SET THE PRIMARY FONT FOR ALL SERIF TEXT IN THE FIGURE  
+    plt.rcParams['font.serif'] = ['DejaVu Serif']  # SET THE PRIMARY FONT FOR ALL SERIF TEXT IN THE FIGURE  
     plt.rcParams['font.size'] = 12  # SET FONT SIZE 
     
     fig, ax = plt.subplots(1, X.shape[-1], figsize=(10, 5))
@@ -292,25 +312,29 @@ def density_scatter_plot(
     return r2, rmse
 
 
-def initial_agb_estimation(OUT_DIR, SCENE_MASK_FILE_100, TRAIN_FILE, OUT_AGB_FILE, SAR_RES_DATA_LIST, FILE_NAME, A_MAX=300):
+def initial_agb_estimation(OUT_DIR, SCENE_MASK_FILE_100,  SAR_RES_DATA_LIST, FILE_NAME, TRAIN_FILE = None, OUT_AGB_FILE = None, A_MAX=300):
     
     
      
      
     # CREATE OUTPUT NAME 
     OUT_PREFIX = OUT_DIR / FILE_NAME
-    ############ estimate AGB initial values ########    
-    mdl00 = FieldRetrieval(TRAIN_FILE)
-    z1, W1, mask_ws1 = mdl00.inversion_setup(SAR_RES_DATA_LIST, agb_file = None, mask_file = TRAIN_FILE, n_1 = 0)
     
-    z1_dim = z1.shape
-    z1r = z1.reshape([-1, z1_dim[1] * z1_dim[2] * z1_dim[3]])
-
-    z0 = mdl00.inversion_return_valid(z1r, mask_ws1, mask_file=TRAIN_FILE)
+    if TRAIN_FILE is not None:
+        ############ estimate AGB initial values ########    
+        mdl00 = FieldRetrieval(TRAIN_FILE)
+        z1, W1, mask_ws1 = mdl00.inversion_setup(SAR_RES_DATA_LIST, agb_file = OUT_AGB_FILE, mask_file = TRAIN_FILE, n_1 = 0)
+        
+        z1_dim = z1.shape
+        z1r = z1.reshape([-1, z1_dim[1] * z1_dim[2] * z1_dim[3]])
+        
+        z0 = mdl00.inversion_return_valid(z1r, mask_ws1, mask_file=TRAIN_FILE)
+        
+        Z0_TRAIN = z0.reshape([-1, z1_dim[1], z1_dim[2], z1_dim[3]])
+        
+        W0_TRAIN = mdl00.inversion_return_valid(W1, mask_ws1, mask_file=TRAIN_FILE)
     
-    Z0_TRAIN = z0.reshape([-1, z1_dim[1], z1_dim[2], z1_dim[3]])
     
-    # W0_TRAIN = mdl00.inversion_return_valid(W1, mask_ws1, mask_file=TRAIN_FILE)
     
     mdl00 = FieldRetrieval(SCENE_MASK_FILE_100)
     
@@ -335,7 +359,7 @@ def initial_agb_estimation(OUT_DIR, SCENE_MASK_FILE_100, TRAIN_FILE, OUT_AGB_FIL
     # param0w, params =  agb_initialization(MEAN_X_TRAIN, W0_TRAIN)
     # para_df = pd.DataFrame()
     
-    for NUM in range(0, Z0_TRAIN.shape[2]):
+    for NUM in range(0, Z0_SCENE.shape[2]):
         
         # param0w, params =  agb_initialization(Z0_TRAIN[:, 0, NUM, :], W0_TRAIN)
         # hf = pd.DataFrame(params[:,np.newaxis].T, columns=["a0", "a1", "a2", "a3", "a4"])
@@ -345,44 +369,88 @@ def initial_agb_estimation(OUT_DIR, SCENE_MASK_FILE_100, TRAIN_FILE, OUT_AGB_FIL
         # W0_HAT_TRAIN =  linear_agb_model(Z0_TRAIN[:, 0, NUM, :], params[0], params[1], params[2], params[3], params[4])    
         
         # Clip the data for maximum AGB value in the training data
-        # FACTOR  = np.sqrt(np.mean(W0_TRAIN[W0_TRAIN< 100]))/np.mean(Z0_TRAIN[:, :, NUM, 0][W0_TRAIN< 100])
-        FACTOR = 100
-        # 
-        # W0_HAT_TRAIN =  np.power((FACTOR * Z0_TRAIN[:, 0, NUM, 0]), 2)
-        # W0_HAT_TRAIN = np.clip(W0_HAT_TRAIN, a_min= 0, a_max=W0_TRAIN.max())
+        if TRAIN_FILE is not None:
+            FACTOR  = np.sqrt(np.mean(W0_TRAIN[W0_TRAIN< 100]))/np.mean(Z0_TRAIN[:, :, NUM, 0][W0_TRAIN< 100])
+            W0_HAT_TRAIN =  np.power((FACTOR * Z0_TRAIN[:, 0, NUM, 0]), 2)
+            W0_HAT_TRAIN = np.clip(W0_HAT_TRAIN, a_min= 0, a_max=W0_TRAIN.max())
+        else:
+            FACTOR = 100
         
         W0_HAT_SCENE =  np.power((FACTOR * Z0_SCENE[:, 0, NUM, 0]), 2)
-        
-        # W0_HAT_SCENE =  linear_agb_model(Z0_SCENE[:, 0, NUM, :], params[0], params[1], params[2], params[3], params[4])            
-        
         # Clip the data for maximum AGB value in the training data
         W0_HAT_SCENE = np.clip(W0_HAT_SCENE, a_min = 0, a_max = A_MAX)
-        
         #writing the output to geotiff
         AGB_NAME =  OUT_DIR / os.path.basename(SAR_RES_DATA_LIST[::2][NUM]).replace('.tif', '_initial_agb.tif')
         
+        # OUT_ARRAY = IN0.GetRasterBand(1).ReadAsArray()
+        # OUT_ARRAY[OUT_ARRAY > 0] = W0_HAT_SCENE
+        
+        # try:
+        #     os.remove(AGB_NAME)
+        # except OSError:
+        #     pass
+        # driver = gdal.GetDriverByName("GTiff")
+        # ds = driver.CreateCopy(
+        #     AGB_NAME,
+        #     IN0,
+        #     0,
+        #     ["COMPRESS=LZW", "PREDICTOR=2"],
+        # )
+        # ds.GetRasterBand(1).WriteArray(OUT_ARRAY)
+        # ds.FlushCache()  # Write to disk.
+        # ds = None
+        
+        # 1. Prepare your array
         OUT_ARRAY = IN0.GetRasterBand(1).ReadAsArray()
         OUT_ARRAY[OUT_ARRAY > 0] = W0_HAT_SCENE
         
+        # 2. Create a Workspace in Memory (RAM)
+        # This prevents writing a "broken" file to disk
+        mem_driver = gdal.GetDriverByName("MEM")
+        tmp_ds = mem_driver.Create("", IN0.RasterXSize, IN0.RasterYSize, 1, IN0.GetRasterBand(1).DataType)
+        tmp_ds.SetGeoTransform(IN0.GetGeoTransform())
+        tmp_ds.SetProjection(IN0.GetProjection())
+        
+        # 3. Write data to the Memory workspace
+        tmp_band = tmp_ds.GetRasterBand(1)
+        tmp_band.WriteArray(OUT_ARRAY)
+        # Set NoData to NaN (or your preference) to keep stats clean
+        tmp_band.SetNoDataValue(0) 
+        
+        # 4. Define High-Optimization COG Options
+        # Use PREDICTOR=3 for Float32, PREDICTOR=2 for Integers (Byte/Int16)
+        data_type = tmp_band.DataType
+        predictor = "3" if data_type >= 6 else "2"
+        
+        cog_options = [
+            "COMPRESS=DEFLATE",       # Better for cloud storage than LZW
+            "LEVEL=9",                # Max compression
+            f"PREDICTOR={predictor}", 
+            "BLOCKSIZE=512",          # Standard for cloud range-requests
+            "BIGTIFF=YES",
+            "NUM_THREADS=ALL_CPUS",
+            "OVERVIEW_RESAMPLING=AVERAGE"
+            ]
+        
+        # 5. Finalize: Write the COG in one single shot
         try:
-            os.remove(AGB_NAME)
+            if os.path.exists(AGB_NAME):
+                os.remove(AGB_NAME)
         except OSError:
             pass
-        driver = gdal.GetDriverByName("GTiff")
-        ds = driver.CreateCopy(
-            AGB_NAME,
-            IN0,
-            0,
-            ["COMPRESS=LZW", "PREDICTOR=2"],
-        )
-        ds.GetRasterBand(1).WriteArray(OUT_ARRAY)
-        ds.FlushCache()  # Write to disk.
+
+        cog_driver = gdal.GetDriverByName("COG")
+        ds = cog_driver.CreateCopy(AGB_NAME, tmp_ds, options=cog_options)
+        
+        # 6. Cleanup
         ds = None
-    
+        tmp_ds = None
+        print(f"Validated COG created: {AGB_NAME}")
+        
     
         # plt.plot(W0_TRAIN, W0_HAT_TRAIN, '.')
-    
-    
+        
+        
     
     
     
@@ -481,16 +549,6 @@ def initial_agb_estimation(OUT_DIR, SCENE_MASK_FILE_100, TRAIN_FILE, OUT_AGB_FIL
 
 
 
-
-
-
-
-
-
-
-
-
-
 def data_clean(X, y, w1_noise=10, w2_noise=20):
     """
 
@@ -501,7 +559,7 @@ def data_clean(X, y, w1_noise=10, w2_noise=20):
     :return:
     """
     # define noise threshold
-    print(w1_noise, w2_noise)
+
     noise_threshold = w1_noise + w2_noise * 0.01 * y
 
     mdl1 = RandomForestRegressor(
@@ -860,6 +918,67 @@ class Retrieval:
         y_hat = np.array(y_hat)
         return params, y_hat
     
+    def optimize_two_stage_worker(self, task_data):
+        """
+        Handles the inversion for a single pixel.
+        This is the function executed by the worker processes.
+        """
+        # NOW: bounds_cfg is passed in!
+        y_obs, p0_full, weights, bounds_cfg = task_data
+        
+        # bounds_cfg mapping: 
+        # [0:6] -> A,B,C | [6:9] -> D,S | [9] -> W
+    
+        # --- STAGE 1: RETRIEVE BIOMASS (W) ---
+        p0_w = p0_full[13:14]
+        w_mult = bounds_cfg[9] # e.g., (0.2, 1.8)
+        bounds_w = [(p0_w[0] * w_mult[0], p0_w[0] * w_mult[1])] 
+        
+        def obj_stage1(w_val):
+            x_recon = np.concatenate([p0_full[:13], w_val])
+            y_hat = self.sar_model_03_fun(x_recon).reshape(-1, self.size_p)
+            return np.sum((( 10*np.log10(y_hat) - 10*np.log10(y_obs.reshape(-1, self.size_p)) ) * weights)**2)
+
+        res_w = minimize(obj_stage1, p0_w, method='L-BFGS-B', bounds=bounds_w)
+        w_curr = res_w.x
+        
+        # --- STAGE 2: RETRIEVE SOIL (S) & COEFFICIENTS ---
+        p0_s2 = np.concatenate([p0_full[0:6], p0_full[10:13]])
+            
+        # Combine bounds for Stage 2 (A,B,C + D,S)
+        # This grabs the specific multipliers you provided for those 9 active params
+        active_mults = bounds_cfg[0:6] + bounds_cfg[6:9]
+        bounds_s2 = [(p0_s2[i] * m[0], p0_s2[i] * m[1]) for i, m in enumerate(active_mults)]
+        
+        def obj_stage2(x9):
+            x_recon = np.concatenate([x9[:6], p0_full[6:10], x9[6:], w_curr])
+            y_hat = self.sar_model_03_fun(x_recon).reshape(-1, self.size_p)
+            return np.sum(((10*np.log10(y_hat) - 10*np.log10(y_obs.reshape(-1, self.size_p))) * weights)**2)
+        
+        res_s2 = minimize(obj_stage2, p0_s2, method='L-BFGS-B', bounds=bounds_s2)
+        
+        final_p = np.concatenate([res_s2.x[:6], p0_full[6:10], res_s2.x[6:], w_curr])
+        return final_p, self.sar_model_03_fun(final_p).flatten()
+    
+    def sar_model_inverse_03_v2(self, param0c, z, bounds_cfg, init_weights=[4, 1]):
+        """
+        MODIFIED: Now accepts bounds_cfg and passes it to the parallel workers.
+        """
+        n_samples = z.shape[0]
+        wt = np.array(init_weights)
+        
+        # --- THE CRITICAL CHANGE ---
+        # We add bounds_cfg to the tuple so each worker knows its specific constraints.
+        tasks = [(z[i], param0c[i], wt, bounds_cfg) for i in range(n_samples)]
+        
+        # ProcessPoolExecutor distributes these tasks across your CPU cores
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            # Each worker now receives (z, p0, wt, bounds_cfg)
+            results = list(executor.map(self.optimize_two_stage_worker, tasks))
+
+        params, y_hat = zip(*results)
+        return np.array(params), np.array(y_hat)
+    
     
     
     
@@ -908,13 +1027,7 @@ def nisar_model_objective(parameters, *data):
     # Constraint 1: x1 + x2 >= 3
     if not (CHH - CHV > 0):
         return 10e20 
-    
-    # if not (AHH - CHH > 0):
-    #     return 10e10 
-    
-    # if not (AHV - CHV > 0):
-    #     return 10e10 
-        
+
     # Constraint 1: x1 + x2 >= 3
     if not (DHH - DHV > 0):
         return 10e20 
@@ -928,12 +1041,12 @@ def nisar_model_objective(parameters, *data):
         return 10e20 
     
     # Constraint 1: x1 + x2 >= 3
-    if not (deltaHV - deltaHH > 0):
+    if not (deltaHH - deltaHV > 0):
         return 10e20 
     
      
-    if (AHH - AHV > 0) & (alphaHV - alphaHH > 0) & (CHH - CHV > 0) & (DHH - DHV > 0) & (BHV - BHH > 0)  &  (deltaHV - deltaHH > 0): #&  (AHH - CHH > 0) & (AHV - CHV > 0) & (deltaHH - alphaHH > 0) & (deltaHV - alphaHV > 0)
-        return np.sum( (4 * pow((Y_PRED_HV - Y_HV), 2)) + (pow((Y_PRED_HH - Y_HH),2)))    
+    if (AHH - AHV > 0) & (alphaHV - alphaHH > 0) & (CHH - CHV > 0) & (DHH - DHV > 0) & (BHV - BHH > 0)  &  (deltaHH - deltaHV > 0): #&  (AHH - CHH > 0) & (AHV - CHV > 0) & (deltaHH - alphaHH > 0) & (deltaHV - alphaHV > 0)
+        return np.sum( (4 * pow((10*np.log10(Y_PRED_HV) - 10*np.log10(Y_HV)), 2)) + (pow((10*np.log10(Y_PRED_HH) - 10*np.log10(Y_HH)),2)))    
     
 
     
@@ -1005,15 +1118,46 @@ class FieldRetrieval:
         lc[~idx] = self.valid_min
         array0[array0 > self.valid_min] = lc
 
+        # mask_ws0 = "{}_mask_ws0.tif".format(self.out_name)
+        # driver = gdal.GetDriverByName("GTiff")
+        # ds = driver.CreateCopy(mask_ws0, in0, 0, ["COMPRESS=LZW", "PREDICTOR=2"])
+        # ds.GetRasterBand(1).WriteArray(array0)
+        # ds.FlushCache()  # Write to disk.
+        # ds = None
+        # in0 = None
+        
         mask_ws0 = "{}_mask_ws0.tif".format(self.out_name)
-        driver = gdal.GetDriverByName("GTiff")
-        ds = driver.CreateCopy(mask_ws0, in0, 0, ["COMPRESS=LZW", "PREDICTOR=2"])
-        ds.GetRasterBand(1).WriteArray(array0)
-        ds.FlushCache()  # Write to disk.
-        ds = None
-        in0 = None
 
+        # 1. Prepare your data in a Memory Dataset first
+        mem_driver = gdal.GetDriverByName("MEM")
+        tmp_ds = mem_driver.Create("", in0.RasterXSize, in0.RasterYSize, 1, in0.GetRasterBand(1).DataType)
+        tmp_ds.SetGeoTransform(in0.GetGeoTransform())
+        tmp_ds.SetProjection(in0.GetProjection())
+        
+        # 2. Apply your modifications here
+        tmp_band = tmp_ds.GetRasterBand(1)
+        tmp_band.WriteArray(array0)
+        tmp_band.SetNoDataValue(0) # Or nan
+        
+        # 3. Finalize: Write to COG in one single operation
+        cog_driver = gdal.GetDriverByName("COG")
+        cog_options = [
+            "COMPRESS=LZW",
+            "PREDICTOR=2",
+            "BLOCKSIZE=512",
+            "NUM_THREADS=ALL_CPUS"
+            ]
+        
+        # This creates a perfectly optimized file that will NOT trigger the warning
+        final_ds = cog_driver.CreateCopy(mask_ws0, tmp_ds, options=cog_options)
+        
+        # Cleanup
+        final_ds = None
+        tmp_ds = None
+            
         return x0, y0, mask_ws0
+    
+    
     def data_cleaner_2(
         self, out_radar_list, agb_file=None, mask_file=None, w1_noise=10, w2_noise=20
     ):
@@ -1076,6 +1220,10 @@ class FieldRetrieval:
 
         return x0, y0, mask_ws0
     
+     
+    
+    
+    
     def inversion_setup(self, out_radar_list, agb_file=None, mask_file=None, n_1=0):
         """
         set up the inversion of AGB retrieval.
@@ -1097,13 +1245,45 @@ class FieldRetrieval:
         array0 = ndimage.binary_dilation(
             array0, structure=struct2, iterations=n_2
         ).astype(array0.dtype)
+        # mask_ws1 = "{}_mask_ws1.tif".format(self.out_name)
+        # driver = gdal.GetDriverByName("GTiff")
+        # ds = driver.CreateCopy(mask_ws1, in0, 0, ["COMPRESS=LZW", "PREDICTOR=2"])
+        # ds.GetRasterBand(1).WriteArray(array0)
+        # ds.FlushCache()  # Write to disk.
+        # ds = None
+        # in0 = None
+        
+        
         mask_ws1 = "{}_mask_ws1.tif".format(self.out_name)
-        driver = gdal.GetDriverByName("GTiff")
-        ds = driver.CreateCopy(mask_ws1, in0, 0, ["COMPRESS=LZW", "PREDICTOR=2"])
-        ds.GetRasterBand(1).WriteArray(array0)
-        ds.FlushCache()  # Write to disk.
-        ds = None
-        in0 = None
+
+        # 1. Prepare your data in a Memory Dataset first
+        mem_driver = gdal.GetDriverByName("MEM")
+        tmp_ds = mem_driver.Create("", in0.RasterXSize, in0.RasterYSize, 1, in0.GetRasterBand(1).DataType)
+        tmp_ds.SetGeoTransform(in0.GetGeoTransform())
+        tmp_ds.SetProjection(in0.GetProjection())
+        
+        # 2. Apply your modifications here
+        tmp_band = tmp_ds.GetRasterBand(1)
+        tmp_band.WriteArray(array0)
+        tmp_band.SetNoDataValue(0) # Or nan
+        
+        # 3. Finalize: Write to COG in one single operation
+        cog_driver = gdal.GetDriverByName("COG")
+        cog_options = [
+            "COMPRESS=LZW",
+            "PREDICTOR=2",
+            "BLOCKSIZE=512",
+            "NUM_THREADS=ALL_CPUS"
+            ]
+        # This creates a perfectly optimized file that will NOT trigger the warning
+        final_ds = cog_driver.CreateCopy(mask_ws1, tmp_ds, options=cog_options)
+        
+        # Cleanup
+        final_ds = None
+        tmp_ds = None
+        
+        
+        
 
         if not os.path.exists("tmp"):
             os.mkdir("tmp")
@@ -1156,7 +1336,7 @@ class FieldRetrieval:
 
         if len(W1.shape) == 1:
             W1 = W1[:, None]
-        # print(W1.shape)
+        print(W1.shape)
 
         W0 = []
         for i in range(W1.shape[1]):
@@ -1211,9 +1391,6 @@ class FieldRetrieval:
         plt.savefig(out_prefix + 'agb_vs_backscatter.png', dpi=600)
         plt.show()
         plt.close()
-        
-        
-    
         
         
         mean_x = np.stack([mean_hv, mean_hh]).T
@@ -1425,11 +1602,95 @@ class FieldRetrieval:
 
         return W_mean, S_mean
     
-         
+    
+    def inversion_recursive_ws_v4(self, z1, w1, mask_ws1, param0_file=None):
+        """
+
+        Args:
+            z1: input signal (n_obs, nxn, n_time, 2_pols)
+            mask_ws1: raster mask file used to define valid pixels (# of valid: n_obs)
+            param0_file: file storing the initial parameters
+
+        Returns: W (agb), S (agb) - with the dimension (obs, n_time)
+
+        """
+        
+        # User-defined slack multipliers
+        bounds_cfg = [
+            (0.8, 1.2), (0.8, 1.2), # A
+            (0.8, 1.2), (0.8, 1.2), # B
+            (0.8, 1.2), (0.8, 1.2), # C
+            (0.8, 1.2), (0.8, 1.2), # D
+            (0.4, 1.6),             # S
+            (0.2, 1.8)              # W
+            ]
+
+        kn = 10  # Max recursive iterations
+        
+        # Load initial coefficients from CSV
+        if param0_file is None:
+            in_path = os.path.dirname(self.mask_file)
+            param0_file = f"{in_path}/model_sim_param0_s13.csv"
+        df0 = pd.read_csv(param0_file)
+        param0 = df0.iloc[0, 1:].values  # Standard model coefficients
+        
+        
+    
+        n_obs = z1.shape[0]
+        nxn = z1.shape[1]
+        m_t = z1.shape[2]
+        model_00 = Retrieval(2, 1, nxn)
+        
+        # n_1 = (np.sqrt(nxn) - 1) // 2
+        # in0 = gdal.Open(mask_ws1, gdal.GA_ReadOnly)
+        W_mean = []
+        S_mean = []
+        
+        for i in range(m_t):
+            print(f"\n--- Processing Scene {i+1} of {m_t} ---")
+            z_scene = z1[:, :, i, :]
+            param0w = w1[:, i][:, np.newaxis]
+            param0c = np.tile(param0, (n_obs, 1))
+            param0c = np.concatenate((param0c, param0w), axis=1)
+            
+            
+        
+        
+            for k in range(kn):
+                params, y_hat = model_00.sar_model_inverse_03_v2(param0c, z_scene, bounds_cfg)
+                w_new = params[:, -1]
+                w0sum = np.sqrt(np.mean((w_new - param0c[:, -1])**2))
+                param0c = params.copy()
+                # Update for next iteration
+                
+                # density_scatter_plot((self.out_name + "_ws1_y_s{}_k{}.png").format(i, k),
+                #     z_scene.flatten(),
+                #     y_hat.flatten(),
+                #     x_label="Measured Backscatter",
+                #     y_label="Predicted Backscatter",
+                #     x_limit=(0, 0.6),
+                #     y_limit=(0, 0.6),
+                # )
+                
+                
+                print(f'k = {k}, w_res = {w0sum}')
+                
+                if w0sum < 1.0: break
+            
+            W_mean.append(w_new); S_mean.append(params[:, 12])
+
+        W_mean = np.array(W_mean).T
+        S_mean = np.array(S_mean).T
+        print("Dimension of W: {}".format(W_mean.shape))  # should be (n_obs, m_t)
+
+ 
+        return W_mean, S_mean
+    
+
     
     
 # scatter 0
-def scatter_plot_radar_agb(wd, mask_file, agb_file, sar_list,w1_noise, w2_noise, out_name,  x_txt="AGB (Mg/ha)"):
+def scatter_plot_radar_agb(wd, mask_file, agb_file, sar_list, out_name,  x_txt="AGB (Mg/ha)"):
     os.chdir(wd)
 
     w1_slider = widgets.FloatSlider(
@@ -1459,7 +1720,7 @@ def scatter_plot_radar_agb(wd, mask_file, agb_file, sar_list,w1_noise, w2_noise,
         layout=widgets.Layout(width="80%"),
     )
 
-    def update_numbers(w1_noise=w1_noise, w2_noise=w2_noise):
+    def update_numbers(w1_noise=20, w2_noise=20):
         out_prefix = f"{out_name}"
         mdl00 = FieldRetrieval(mask_file, out_name=out_prefix)
         x0, y0, mask0 = mdl00.data_cleaner(
@@ -1753,7 +2014,7 @@ def plot_nisar_curve(X, W0, OUT_PREFIX, param0, X_RANGE):
     
     
     plt.rcParams['font.family'] = 'serif'  # SET DEFAULT FONT FAMILY FOR FIGURE 
-    plt.rcParams['font.serif'] = ['Times New Roman']  # SET THE PRIMARY FONT FOR ALL SERIF TEXT IN THE FIGURE  
+    plt.rcParams['font.serif'] = ['DejaVu Serif']  # SET THE PRIMARY FONT FOR ALL SERIF TEXT IN THE FIGURE  
     plt.rcParams['font.size'] = 12  # SET FONT SIZE 
     
     fig, ax = plt.subplots(1, X.shape[-1], figsize=(10, 5))
@@ -1860,7 +2121,7 @@ def nisar_parameter_estimation(
     
     
  
-
+import time
 # hh/hv retrieval
 def scatter_plot_agb_retrieval0_v3(OUT_DIR,
                                    FILE_NAME,
@@ -1873,7 +2134,7 @@ def scatter_plot_agb_retrieval0_v3(OUT_DIR,
                                    PARAM0_FILE = None
                                    ):    
     
-    
+    start_time = time.time()
     nwin_size = 0
     
     os.chdir(OUT_DIR)
@@ -1900,15 +2161,17 @@ def scatter_plot_agb_retrieval0_v3(OUT_DIR,
     # GET THE INITIAL AGB FILES
     OUT_AGB_INIT_FILE = []
     for NUM in range(0, M_T):
-        OUT_AGB_INIT_FILE.append(OUT_DIR / os.path.basename(SAR_RES_DATA_LIST[::2][NUM]).replace('.tif', '_initial_agb.tif'))
+        for NUMJ in range(0, 2):
+            OUT_AGB_INIT_FILE.append(OUT_DIR / os.path.basename(SAR_RES_DATA_LIST[::2][NUM]).replace('.tif', '_initial_agb.tif'))
     
     
     
-    W1_INIT, _, mask_ws1_INIT = mdl00.inversion_setup(OUT_AGB_INIT_FILE, mask_file = TRAIN_FILE, n_1 = nwin_size)
+    W1_INIT, _, mask_ws1_INIT = mdl00.inversion_setup(OUT_AGB_INIT_FILE, agb_file = OUT_AGB_FILE, mask_file = TRAIN_FILE, n_1 = nwin_size)
     
-    w1_dim_INIT = W1_INIT.shape
-    W1r_INIT = W1_INIT.reshape([-1, w1_dim_INIT[1] * w1_dim_INIT[2] * w1_dim_INIT[3]])
-
+    W1_INIT = W1_INIT[:, 0, :, 0]
+    # w1_dim_INIT = W1_INIT.shape
+    # W1r_INIT = W1_INIT.reshape([-1, w1_dim_INIT[1] * w1_dim_INIT[2] * w1_dim_INIT[3]])
+    W1r_INIT = W1_INIT
     W0_INIT_TRAIN = mdl00.inversion_return_valid(W1r_INIT, mask_ws1_INIT, mask_file=TRAIN_FILE)
     
     
@@ -2145,8 +2408,13 @@ def scatter_plot_agb_retrieval0_v3(OUT_DIR,
         
         W1_INIT, _, mask_ws1_INIT = mdl00.inversion_setup(OUT_AGB_INIT_FILE, mask_file = TEST_FILE, n_1 = nwin_size)
         
-        w1_dim_INIT = W1_INIT.shape
-        W1r_INIT = W1_INIT.reshape([-1, w1_dim_INIT[1] * w1_dim_INIT[2] * w1_dim_INIT[3]])
+        W1_INIT = W1_INIT[:, 0, :, 0]
+        # w1_dim_INIT = W1_INIT.shape
+        # W1r_INIT = W1_INIT.reshape([-1, w1_dim_INIT[1] * w1_dim_INIT[2] * w1_dim_INIT[3]])
+        W1r_INIT = W1_INIT
+        
+        # w1_dim_INIT = W1_INIT.shape
+        # W1r_INIT = W1_INIT.reshape([-1, w1_dim_INIT[1] * w1_dim_INIT[2] * w1_dim_INIT[3]])
 
         W0_INIT_TEST = mdl00.inversion_return_valid(W1r_INIT, mask_ws1_INIT, mask_file=TEST_FILE)
         
@@ -2332,30 +2600,518 @@ def scatter_plot_agb_retrieval0_v3(OUT_DIR,
         app = widgets.VBox([widgets.Label("Number of Scenes: "), mt_slider, container2])
         
         
-        
+    end_module = time.time()
+    duration_mins = (end_module - start_time) / 60
+    print(f"Module Computation Time: {duration_mins:.2f} minutes")
 
     return app
 
-
-
-
-def colormap_plot_agb_prediction(OUT_DIR, SAR_RES_DATA_LIST, MASK_FILE, PARAM0_FILE, FILE_NAME, a_max=300, ab_range=[23, 29]):
+# hh/hv retrieval
+def scatter_plot_agb_retrieval0_v4(OUT_DIR,
+                                   FILE_NAME,
+                                   TRAIN_FILE,
+                                   OUT_AGB_FILE,
+                                   SAR_RES_DATA_LIST,
+                                   TEST_FILE = None,
+                                   X_RANGE = [0, 200],
+                                   X_TXT = "AGB (Mg/ha)",
+                                   PARAM0_FILE = None
+                                   ):    
+    
+    start_time = time.time()
+    
+    nwin_size = 0
     
     os.chdir(OUT_DIR)
     
-
+    
+    
     # CREATE OUTPUT NAME 
     OUT_PREFIX = OUT_DIR / FILE_NAME
     
+    mdl00 = FieldRetrieval(TRAIN_FILE, out_name=FILE_NAME)
     
-    mdl00 = FieldRetrieval(MASK_FILE, out_name=OUT_PREFIX)
+    z1, W1, mask_ws1 = mdl00.inversion_setup(SAR_RES_DATA_LIST, agb_file = OUT_AGB_FILE, mask_file = TRAIN_FILE, n_1 = nwin_size)
+    
+    z1_dim = z1.shape
+    z1r = z1.reshape([-1, z1_dim[1] * z1_dim[2] * z1_dim[3]])
+
+    z0 = mdl00.inversion_return_valid(z1r, mask_ws1, mask_file=TRAIN_FILE)
+    
+    Z0_TRAIN = z0.reshape([-1, z1_dim[1], z1_dim[2], z1_dim[3]])
+    
+    W0_TRAIN = mdl00.inversion_return_valid(W1, mask_ws1, mask_file=TRAIN_FILE)
+    
+    M_T = Z0_TRAIN.shape[2]
+    # GET THE INITIAL AGB FILES
+    OUT_AGB_INIT_FILE = []
+    for NUM in range(0, M_T):
+        for NUMJ in range(0, 2):
+            OUT_AGB_INIT_FILE.append(OUT_DIR / os.path.basename(SAR_RES_DATA_LIST[::2][NUM]).replace('.tif', '_initial_agb.tif'))
+    
+    
+    
+    W1_INIT, _, mask_ws1_INIT = mdl00.inversion_setup(OUT_AGB_INIT_FILE, agb_file = OUT_AGB_FILE, mask_file = TRAIN_FILE, n_1 = nwin_size)
+    
+    W1_INIT = W1_INIT[:, 0, :, 0]
+    # w1_dim_INIT = W1_INIT.shape
+    # W1r_INIT = W1_INIT.reshape([-1, w1_dim_INIT[1] * w1_dim_INIT[2] * w1_dim_INIT[3]])
+    W1r_INIT = W1_INIT
+    W0_INIT_TRAIN = mdl00.inversion_return_valid(W1r_INIT, mask_ws1_INIT, mask_file=TRAIN_FILE)
+    
+    
+    
+    import pickle
+
+    with open(str(OUT_PREFIX) + "_z0_W0.bin", "wb") as f:
+        pickle.dump([Z0_TRAIN, W0_TRAIN], f)
+
+    W_MEAN, _ = mdl00.inversion_recursive_ws_v4(Z0_TRAIN, W0_INIT_TRAIN, TRAIN_FILE, param0_file=PARAM0_FILE)
+    
+    W_MEAN = np.clip(W_MEAN, a_min= 0, a_max=W0_TRAIN.max())
+
+
+    Y0 = W0_TRAIN
+    Y0 = Y0.flatten()
+     
+    
+    R2_TRAIN = []
+    RMSE_TRAIN = []
+    W_MEAN2_TRAIN = []
+    for i in range(M_T):
+        X0 = np.mean(W_MEAN[:, : i + 1], axis=1)
+        R2_1 = r2_score(Y0[~np.isnan(X0), None], X0[~np.isnan(X0)])
+        RMSE_1 = np.sqrt(
+            mean_squared_error(Y0[~np.isnan(X0), None], X0[~np.isnan(Y0), None])
+        )
+
+        W_MEAN2_TRAIN.append(X0)
+        R2_TRAIN.append(R2_1)
+        RMSE_TRAIN.append(RMSE_1)
+    
+    
+    R2_TRAIN_100 = []
+    RMSE_TRAIN_100 = []
+    for NUM in range(M_T):
+        X0 = np.nanmean(W_MEAN[:, : NUM + 1], axis=1)
+        # R2_1 = r2_score(Y0[~np.isnan(X0), None][Y0<100] , X0[~np.isnan(X0), None][Y0<100])
+        R2_1 = r2_score(Y0[~np.isnan(X0), None][Y0<100], X0[~np.isnan(X0), None][Y0<100])
+        # print("Variance score 1: {:.2f}".format(r2_1))
+        RMSE_1 = np.sqrt(
+            mean_squared_error(Y0[~np.isnan(X0), None][Y0<100], X0[~np.isnan(X0), None][Y0<100])
+        )
+        # print("RMSE: {:.5f}".format(rmse_1))
+        R2_TRAIN_100.append(R2_1)
+        RMSE_TRAIN_100.append(RMSE_1)
+    R2_TRAIN_100 = np.array(R2_TRAIN_100)
+    RMSE_TRAIN_100 = np.array(RMSE_TRAIN_100)
+    
+    
+    df = pd.DataFrame()
+    df["AGB_measured"] = W0_TRAIN.ravel()
+    for i in range(len(W_MEAN2_TRAIN)):
+        df["AGB_predicted_" + str(i)] = W_MEAN2_TRAIN[i] 
+    df.to_csv(f"{OUT_PREFIX}_independent_AGB_train.csv")
+    
+    print(f"{OUT_PREFIX}_independent_AGB_train.csv")
+    
+    df = pd.DataFrame(
+        {
+            "AGB_measured": W0_TRAIN.ravel(),
+            "AGB_predicted": W_MEAN2_TRAIN[-1],
+            "HH_mean": np.nanmean(Z0_TRAIN[:, 0, :, 1], axis=-1),
+            "HV_mean": np.nanmean(Z0_TRAIN[:, 0, :, 0], axis=-1),
+        }
+    )
+    df.to_csv(f"{OUT_PREFIX}_mean_data.csv")
+
+    trace1 = go.Scatter(
+        x = np.arange(M_T) + 1,
+        y = R2_TRAIN,
+        mode="lines+markers",
+        name="R<sup>2</sup>",
+        marker=dict(size=10),
+    )
+    trace2 = go.Scatter(
+        x = np.arange(M_T) + 1,
+        y = RMSE_TRAIN,
+        mode="lines+markers",
+        name="RMSE",
+        marker=dict(size=10),
+    )
+    layout1 = go.Layout(
+        xaxis={"title": "Number of Scenes"},
+        yaxis={
+            "title": "R<sup>2</sup>",
+        },
+        width=300,
+        height=180,
+        margin={"l": 60, "b": 40, "t": 10, "r": 10},
+        hovermode="closest",
+    )
+    layout2 = go.Layout(
+        xaxis={"title": "Number of Scenes"},
+        yaxis={
+            "title": "RMSE",
+        },
+        width=300,
+        height=180,
+        margin={"l": 60, "b": 40, "t": 10, "r": 10},
+        hovermode="closest",
+    )
+    g1 = go.FigureWidget(data=[trace1], layout=layout1)
+    g2 = go.FigureWidget(data=[trace2], layout=layout2)
+    mt_slider = widgets.IntSlider(
+        value=10,
+        min=1,
+        max=M_T,
+        step=1,
+        disabled=False,
+        orientation="horizontal",
+        readout=True,
+        readout_format="d",
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width="80%"),
+    )
+
+    def update_numbers(m_ti=-1):
+        y = W_MEAN2_TRAIN[m_ti]
+        x = Y0
+        xy = np.vstack([x, y])
+        z0 = gaussian_kde(xy)(xy)
+        p2 = np.sum((x - 20 < y) & (y < x + 20) & (x < 100)) / x[x < 100].size * 100
+        p1 = np.sum((x - 10 < y) & (y < x + 10) & (x < 100)) / x[x < 100].size * 100
+        return x, y, z0, p1, p2
+
+    
+    x, y, z0, p1, p2 = update_numbers()
+    
+    
+    
+    trace3 = go.Scatter(
+        x=x,
+        y=y,
+        mode="markers",
+        name="points",
+        marker=dict(
+            color=z0,
+            colorscale="Blues_r",
+            reversescale=True,
+            size=10,
+            opacity=0.5,
+            line=dict(width=1),
+        ),
+    )
+    trace4 = go.Scatter(
+        x = X_RANGE,
+        y = X_RANGE,
+        mode="lines",
+        line=dict(width=2, color="rgb(0.8, 0.8, 0.8)"),
+    )
+    data = [trace3, trace4]
+    layout3 = go.Layout(
+        xaxis={
+            "title": f"Measured {X_TXT}",
+            "range": X_RANGE,
+        },
+        yaxis={
+            "title": f"Predicted {X_TXT}",
+            "range": X_RANGE,
+        },
+        width=400,
+        height=360,
+        margin={"l": 60, "b": 40, "t": 10, "r": 10},
+        showlegend=False,
+        hovermode="closest",
+        annotations=[
+            dict(
+                x=X_RANGE[0] + 0.2 * (X_RANGE[1] - X_RANGE[0]),
+                y=X_RANGE[0] + 0.9 * (X_RANGE[1] - X_RANGE[0]),
+                showarrow=False,
+                text="{:.1f}% within 20 <br> {:.1f}% within 10".format(p2, p1),
+            )
+        ],
+    )
+    g3 = go.FigureWidget(data=data, layout=layout3)
+    
+    p1 = []; p2= []
+    for i in range(M_T):
+        x, y, z0, a, b = update_numbers(i)
+        p1.append(a.round(2)); p2.append(b.round(2))
+        
+    df = pd.DataFrame(
+        {
+            "RMSE": RMSE_TRAIN,
+            "r2": R2_TRAIN,
+            "RMSE_100": RMSE_TRAIN_100,
+            "r2_100": R2_TRAIN_100,
+            "per20": p2,
+            "per10": p1 
+        }
+    )
+    df.to_csv(f"{OUT_PREFIX}_train_stats.csv")
+    
+    #plot_accuracy_stats(M_T, RMSE_TRAIN, R2_TRAIN, RMSE_TRAIN_100, R2_TRAIN_100, p2, p1, str(OUT_PREFIX) + "_train_stats.png")
+    
+    if TEST_FILE is None:
+
+        def response(change):
+            x, y, z0, p1, p2 = update_numbers(mt_slider.value - 1)
+            with g3.batch_update():
+                g3.data[0].x = x
+                g3.data[0].y = y
+                g3.data[0].marker = dict(
+                    color=z0,
+                    colorscale="Blues_r",
+                    reversescale=True,
+                    size=10,
+                    opacity=0.5,
+                    line=dict(width=1),
+                )
+                g3.layout.annotations[0][
+                    "text"
+                ] = "{:.1f}% within 20 <br> {:.1f}% within 10".format(p2, p1)
+
+        mt_slider.observe(response, names="value")
+        container1 = widgets.VBox([g1, g2])
+        container2 = widgets.HBox([container1, g3])
+        app = widgets.VBox([widgets.Label("Number of Scenes: "), mt_slider, container2])
+    else:
+        
+        mdl00 = FieldRetrieval(TEST_FILE, out_name = FILE_NAME + '_test')
+        
+        z1, W1, mask_ws1_test = mdl00.inversion_setup(SAR_RES_DATA_LIST, agb_file = OUT_AGB_FILE, mask_file = TEST_FILE, n_1 = nwin_size)
+        
+        z1_dim = z1.shape
+        z1r = z1.reshape([-1, z1_dim[1] * z1_dim[2] * z1_dim[3]])
+
+        z0 = mdl00.inversion_return_valid(z1r, mask_ws1_test, mask_file=TEST_FILE)
+        
+        Z0_TEST = z0.reshape([-1, z1_dim[1], z1_dim[2], z1_dim[3]])
+        
+        W0_TEST = mdl00.inversion_return_valid(W1, mask_ws1_test, mask_file=TEST_FILE)
+        
+        W1_INIT, _, mask_ws1_INIT = mdl00.inversion_setup(OUT_AGB_INIT_FILE, mask_file = TEST_FILE, n_1 = nwin_size)
+        
+        W1_INIT = W1_INIT[:, 0, :, 0]
+        # w1_dim_INIT = W1_INIT.shape
+        # W1r_INIT = W1_INIT.reshape([-1, w1_dim_INIT[1] * w1_dim_INIT[2] * w1_dim_INIT[3]])
+        W1r_INIT = W1_INIT
+        
+        # w1_dim_INIT = W1_INIT.shape
+        # W1r_INIT = W1_INIT.reshape([-1, w1_dim_INIT[1] * w1_dim_INIT[2] * w1_dim_INIT[3]])
+
+        W0_INIT_TEST = mdl00.inversion_return_valid(W1r_INIT, mask_ws1_INIT, mask_file=TEST_FILE)
+        
+        
+        
+        import pickle
+
+        with open(str(OUT_PREFIX) + "_z0_W0_test.bin", "wb") as f:
+            pickle.dump([Z0_TEST, W0_TEST], f)
+
+
+        W_MEAN_TEST, _ = mdl00.inversion_recursive_ws_v4(Z0_TEST, W0_INIT_TEST, TEST_FILE, param0_file=PARAM0_FILE)
+        W_MEAN_TEST = np.clip(W_MEAN_TEST, a_min= 0, a_max=W0_TRAIN.max())
+        
+        Y0_TEST = W0_TEST
+        Y0_TEST = Y0_TEST.flatten()
+        
+        
+        R2_TEST = []
+        RMSE_TEST = []
+        W_MEAN2_TEST = []
+        for i in range(M_T):
+            X0 = np.mean(W_MEAN_TEST[:, : i + 1], axis=1)
+            R2_1 = r2_score(Y0_TEST[~np.isnan(X0), None], X0[~np.isnan(X0), None])
+            RMSE_1 = np.sqrt(
+                mean_squared_error(Y0_TEST[~np.isnan(X0), None], X0[~np.isnan(X0), None])
+            )
+
+            W_MEAN2_TEST.append(X0)
+            R2_TEST.append(R2_1)
+            RMSE_TEST.append(RMSE_1)
+
+        R2_TEST_100 = []
+        RMSE_TEST_100 = []
+        for NUM in range(M_T):
+            X0 = np.nanmean(W_MEAN_TEST[:, : NUM + 1], axis=1)
+            R2_1 = r2_score(Y0_TEST[~np.isnan(X0), None][Y0_TEST<100], X0[~np.isnan(X0), None][Y0_TEST<100])
+            # print("Variance score 1: {:.2f}".format(r2_1))
+            RMSE_1 = np.sqrt(
+                mean_squared_error(Y0_TEST[~np.isnan(X0), None][Y0_TEST<100], X0[~np.isnan(X0), None][Y0_TEST<100])
+            )
+            # print("RMSE: {:.5f}".format(rmse_1))
+            R2_TEST_100.append(R2_1)
+            RMSE_TEST_100.append(RMSE_1)
+        R2_TEST_100 = np.array(R2_TEST_100)
+        RMSE_TEST_100 = np.array(RMSE_TEST_100)
+           
+        df = pd.DataFrame()
+        df["AGB_measured"] = W0_TEST.ravel()
+        for i in range(len(W_MEAN2_TEST)):
+            df["AGB_predicted_" + str(i)] = W_MEAN2_TEST[i] 
+        df.to_csv(f"{OUT_PREFIX}_independent_AGB_test.csv")
+        
+        print(os.path.dirname(f"{OUT_PREFIX}_independent_AGB_test.csv"))
+        
+        df = pd.DataFrame(
+            {
+                "AGB_measured": Y0_TEST,
+                "AGB_predicted": W_MEAN2_TEST[-1],
+                "HH_mean": np.nanmean(Z0_TEST[:, 0, :, 1], axis=-1),
+                "HV_mean": np.nanmean(Z0_TEST[:, 0, :, 0], axis=-1),
+            }
+        )
+        df.to_csv(f"{OUT_PREFIX}_mean_data_test.csv")
+
+        def update_numbers_test(m_ti=-1):
+            y = W_MEAN2_TEST[m_ti]
+            x = Y0_TEST
+            xy = np.vstack([x, y])
+            z0 = gaussian_kde(xy)(xy)
+            p2 = np.sum((x - 20 < y) & (y < x + 20) & (x < 100)) / x[x < 100].size * 100
+            p1 = np.sum((x - 10 < y) & (y < x + 10) & (x < 100)) / x[x < 100].size * 100
+            return x, y, z0, p1, p2
+
+        x_test, y_test, z0_test, p1_test, p2_test = update_numbers_test()
+        trace5 = go.Scatter(
+            x=x_test,
+            y=y_test,
+            mode="markers",
+            name="points",
+            marker=dict(
+                color=z0_test,
+                colorscale="Blues_r",
+                reversescale=True,
+                size=10,
+                opacity=0.5,
+                line=dict(width=1),
+            ),
+        )
+        trace6 = go.Scatter(
+            x = X_RANGE,
+            y = X_RANGE,
+            mode="lines",
+            line=dict(width=2, color="rgb(0.8, 0.8, 0.8)"),
+        )
+        data = [trace5, trace6]
+        layout4 = go.Layout(
+            xaxis={
+                "title": f"Measured {X_TXT} - Test",
+                "range": X_RANGE,
+            },
+            yaxis={
+                "title": f"Predicted {X_TXT}",
+                "range": X_RANGE,
+            },
+            width=400,
+            height=360,
+            margin={"l": 60, "b": 40, "t": 10, "r": 10},
+            showlegend=False,
+            hovermode="closest",
+            annotations=[
+                dict(
+                    x=X_RANGE[0] + 0.2 * (X_RANGE[1] - X_RANGE[0]),
+                    y=X_RANGE[0] + 0.9 * (X_RANGE[1] - X_RANGE[0]),
+                    showarrow=False,
+                    text="{:.1f}% within 20 <br> {:.1f}% within 10".format(
+                        p2_test, p1_test
+                    ),
+                )
+            ],
+        )
+        g4 = go.FigureWidget(data=data, layout=layout4)
+        
+        
+
+        def response_test(change):
+            x, y, z0, p1, p2 = update_numbers(mt_slider.value - 1)
+            with g3.batch_update():
+                g3.data[0].x = x
+                g3.data[0].y = y
+                g3.data[0].marker = dict(
+                    color=z0,
+                    colorscale="Blues_r",
+                    reversescale=True,
+                    size=10,
+                    opacity=0.5,
+                    line=dict(width=1),
+                )
+                g3.layout.annotations[0][
+                    "text"
+                ] = "{:.1f}% within 20 <br> {:.1f}% within 10".format(p2, p1)
+            x_test, y_test, z0_test, p1_test, p2_test = update_numbers_test(
+                mt_slider.value - 1
+            )
+            with g4.batch_update():
+                g4.data[0].x = x_test
+                g4.data[0].y = y_test
+                g4.data[0].marker = dict(
+                    color=z0_test,
+                    colorscale="Blues_r",
+                    reversescale=True,
+                    size=10,
+                    opacity=0.5,
+                    line=dict(width=1),
+                )
+                g4.layout.annotations[0][
+                    "text"
+                ] = "{:.1f}% within 20 <br> {:.1f}% within 10".format(p2_test, p1_test)
+            
+            
+        p1_test = []; p2_test = []
+        for i in range(M_T):
+            x, y, z0, a, b = update_numbers_test(i)
+            p1_test.append(a.round(2)); p2_test.append(b.round(2))
+        
+        df = pd.DataFrame(
+            {
+                "RMSE": RMSE_TEST,
+                "r2": R2_TEST,
+                "RMSE_100": RMSE_TEST_100,
+                "r2_100": R2_TEST_100,
+                "per20": p2_test,
+                "per10": p1_test 
+                }
+            )
+        df.to_csv(f"{OUT_PREFIX}_test_stats.csv")
+        #plot_accuracy_stats(M_T, RMSE_TEST, R2_TEST, RMSE_TEST_100, R2_TEST_100, p2_test, p1_test, str(OUT_PREFIX) + "_test_stats.png")
+        #plot_agb_accuracy(str(OUT_PREFIX) + "_agb_measured_vs_pred", W_MEAN2_TRAIN, Y0,  p2, p1, W_MEAN2_TEST, Y0_TEST, p2_test, p1_test)
+        
+        mt_slider.observe(response_test, names="value")
+        container1 = widgets.VBox([g1, g2])
+        container2 = widgets.HBox([container1, g3, g4])
+        app = widgets.VBox([widgets.Label("Number of Scenes: "), mt_slider, container2])
+        
+        
+        
+    end_module = time.time()
+    duration_mins = (end_module - start_time) / 60
+    print(f"Module Computation Time: {duration_mins:.2f} minutes")
+    
+    return app
+
+
+def colormap_plot_agb_prediction(OUTDIR_DIR, SAR_RES_DATA_LIST, SCENE_MASK_FILE, param0_file, FILE_NAME,  ab_range=[43,51]):
+    
+    
+    # CREATE A OUTPUT DIRECTORY, IF IT DOES NOT EXISIT   
+    if not os.path.exists(OUTDIR_DIR + '/output'):
+        os.mkdir(OUTDIR_DIR + '/output')
+    
+    # CREATE OUTPUT NAME 
+    OUT_PREFIX = OUTDIR_DIR + '/output/' + FILE_NAME
+    
+    
+    mdl00 = FieldRetrieval(SCENE_MASK_FILE, out_name=OUT_PREFIX)
     z1, _, mask_ws1 = mdl00.inversion_setup(
-        SAR_RES_DATA_LIST, mask_file=MASK_FILE, n_1=0
+        SAR_RES_DATA_LIST, mask_file=SCENE_MASK_FILE, n_1=0
     )
     
     z1_dim = z1.shape
     z1r = z1.reshape([-1, z1_dim[1] * z1_dim[2] * z1_dim[3]])
-    z0 = mdl00.inversion_return_valid(z1r, mask_ws1, mask_file=MASK_FILE)
+    z0 = mdl00.inversion_return_valid(z1r, mask_ws1, mask_file=SCENE_MASK_FILE)
     z0 = z0.reshape([-1, z1_dim[1], z1_dim[2], z1_dim[3]])
     
     
@@ -2363,120 +3119,243 @@ def colormap_plot_agb_prediction(OUT_DIR, SAR_RES_DATA_LIST, MASK_FILE, PARAM0_F
     # GET THE INITIAL AGB FILES
     OUT_AGB_INIT_FILE = []
     for NUM in range(0, M_T):
-        OUT_AGB_INIT_FILE.append(OUT_DIR  / os.path.basename(SAR_RES_DATA_LIST[::2][NUM]).replace('.tif', '_initial_agb.tif'))
+        OUT_AGB_INIT_FILE.append(OUTDIR_DIR +  '/' + os.path.basename(SAR_RES_DATA_LIST[::2][NUM]).replace('.tif', '_initial_agb.tif'))
+        OUT_AGB_INIT_FILE.append(OUTDIR_DIR +  '/' + os.path.basename(SAR_RES_DATA_LIST[::2][NUM]).replace('.tif', '_initial_agb.tif'))
+        
     
     
     
-    W1_INIT, _, mask_ws1_INIT = mdl00.inversion_setup(OUT_AGB_INIT_FILE, mask_file = MASK_FILE, n_1 = 0)
+    W1_INIT, _, mask_ws1_INIT = mdl00.inversion_setup(
+        OUT_AGB_INIT_FILE, mask_file=SCENE_MASK_FILE, n_1=0
+    )
+    
     
     w1_dim_INIT = W1_INIT.shape
     W1r_INIT = W1_INIT.reshape([-1, w1_dim_INIT[1] * w1_dim_INIT[2] * w1_dim_INIT[3]])
 
-    W0_INIT_TRAIN = mdl00.inversion_return_valid(W1r_INIT, mask_ws1_INIT, mask_file=MASK_FILE)
-
-    W_mean, S_mean = mdl00.inversion_recursive_ws_v3(z0, W0_INIT_TRAIN, MASK_FILE, param0_file=PARAM0_FILE)
-    W_mean = np.clip(W_mean, a_min= 0, a_max=a_max)
-
-    in0 = gdal.Open(SCENE_MASK_FILE_100, gdal.GA_ReadOnly)
-
-    fig, ax = plt.subplots(
-        figsize=(5, 4),
-    )
-    basename = os.path.basename(SAR_RES_DATA_LIST[0])
-    agb_name = f"{OUT_PREFIX}_agb_predictions_mean.tif"
-    print(agb_name)
+    W0_INIT_TRAIN = mdl00.inversion_return_valid(W1r_INIT, mask_ws1_INIT, mask_file=SCENE_MASK_FILE)
+    W0_INIT_TRAIN = W0_INIT_TRAIN[:,  ::2]
+    
+    
+    W_mean, S_mean = mdl00.inversion_recursive_ws_v4(z0, W0_INIT_TRAIN, SCENE_MASK_FILE, param0_file = param0_file)
+    
+    
+    
+    in0 = gdal.Open(SCENE_MASK_FILE, gdal.GA_ReadOnly)
     array0 = in0.GetRasterBand(1).ReadAsArray()
     array0[array0 > 0] = np.mean(W_mean, axis=-1)
+    
+    agb_name = f"{OUT_PREFIX}.tif"
     try:
         os.remove(agb_name)
     except OSError:
         pass
-    driver = gdal.GetDriverByName("GTiff")
-    ds = driver.CreateCopy(
-        agb_name,
-        in0,
-        0,
-        ["COMPRESS=LZW", "PREDICTOR=2"],
-    )
-    ds.GetRasterBand(1).WriteArray(array0)
-    # ds.FlushCache()  # Write to disk.
-    ds = None
-    im = ax.imshow(array0, cmap="gist_earth_r", vmin=0, vmax=100)
-    ax.set_title("AGB Predictions Mean")
-    ax.set_axis_off()
-    cbar = fig.colorbar(im)
-    cbar.ax.set_ylabel("AGB (Mg/ha)")
+    
+    # Force GDAL to show detailed errors in the console
+    gdal.UseExceptions()
 
-    fig, ax = plt.subplots(
-        nrows=np.ceil(W_mean.shape[1] / 2).astype(int),
-        ncols=2, figsize=(9, 4 * np.ceil(W_mean.shape[1] / 2)),
-        sharex=True, sharey=True
-    )
-    ax1 = ax.flatten()
-    for k in range(M_T):
+    mem_driver = gdal.GetDriverByName("MEM")
+    ds_update = mem_driver.Create("", in0.RasterXSize, in0.RasterYSize, 1, gdal.GDT_Float32)
+    ds_update.SetProjection(in0.GetProjection())
+    ds_update.SetGeoTransform(in0.GetGeoTransform())
+    ds_update.GetRasterBand(1).WriteArray(array0)
+    
+    
+    # --- 4. UPDATE METADATA LATER ---
+    
+    source_collectiontime_first = os.path.basename(SAR_RES_DATA_LIST[0]).split('_HVHV')[0]
+    source_collectiontime_last = os.path.basename(SAR_RES_DATA_LIST[-1]).split('_HHHH')[0]
+    Nlen = str(int(len(SAR_RES_DATA_LIST)//2))
+    GRANULE_LIST = [os.path.basename(name).split('_HVHV')[0] for name in SAR_RES_DATA_LIST[::2]]
+    GRANULE_LIST = ", ".join(GRANULE_LIST)
+    
+    ds_update.SetMetadataItem('AREA_OR_POINT', "Area")          # pixel is point or pixel is area
+    ds_update.SetMetadataItem('calval_accuracy', '')             # overall accuracy of the L3 Science Product if the full cal/val workflow was implemented. This relates to science requirements
+    ds_update.SetMetadataItem('calval_processing_facility', '')  # Processing facility that ran the cal/val workflow
+    ds_update.SetMetadataItem('calval_source', '')	              # Data source that was used for calibration and validation of the L3 science product
+    ds_update.SetMetadataItem('calval_status', '')               # Current status of the L3 science product
+    ds_update.SetMetadataItem('CEOS_docid', 'https://ceos.org/ard/files/PFS/SAR/v1.1/CEOS-ARD_PFS_Synthetic_Aperture_Radar_v1.1.pdf')
+    
+    ds_update.SetMetadataItem('prod_access_location', '')
+    ds_update.SetMetadataItem('prod_descriptio', '')	              # 1 sentence on process for generating the product
+    ds_update.SetMetadataItem('prod_agb_param_init', '')	          # initial model parameters for agb
+    ds_update.SetMetadataItem('prod_name', 'AGB')                # name of L3 science product
+    ds_update.SetMetadataItem('prod_agb_param_final', '' )          # final model parameters for agb
+    ds_update.SetMetadataItem('prod_processing_date', datetime.now(UTC).strftime("%Y%m%dT%H%M%S"))	## Date the L3 science products was processed
+    ds_update.SetMetadataItem('prod_processing_facility', '')	     # Where the L3 science product was processed
+    ds_update.SetMetadataItem('prod_software_version', "1.0")      # software version used to create the L3 science product
+    ds_update.SetMetadataItem('prod_speckle_filter', "FALSE")       # Info on whether speckle filtering was applied during product generation
+    ds_update.SetMetadataItem('prod_resample','' )                #The number of pixels aggregated during resampling from the 20m L2 GCOV product to the 100m L3 Science product
+    ds_update.SetMetadataItem('prod_type', "SCIENCE")	         # product type
+    ds_update.SetMetadataItem('prod_units', 'Mg/ha')                # product units
+        
+    ds_update.SetMetadataItem('source_band_width', "20")	# NISAR bandwidth in MHz
+    ds_update.SetMetadataItem('source_center_wavelength', "0.238403545 m")	# NISAR center wavelength in meters
+    ds_update.SetMetadataItem('source_collectiontime_last', source_collectiontime_last)	# NISAR acquisiiton time of last image in time series stack used for evaluation
+    ds_update.SetMetadataItem('source_collectiontime_first', source_collectiontime_first) # NISAR acquisiiton time of first image in time series stack used for evaluation
+    ds_update.SetMetadataItem('source_baseline_last', '')	# NISAR acquisiiton time of last image in time series stack used for the baseline
+    ds_update.SetMetadataItem('source_baseline_first', '')	# NISAR acquisiiton time of first image in time series stack used for the baseline
+    ds_update.SetMetadataItem('source_data_access', '')  #	URL where L3 science product will be stored
+    ds_update.SetMetadataItem('source_instrument', "L-SAR")	# NISAR instrument name
+    ds_update.SetMetadataItem('source_number_of_acquisitions', Nlen)	# Number of NISAR acquisitions in the time series stack
+    ds_update.SetMetadataItem('source_radar_pointing', "left")
+    ds_update.SetMetadataItem('source_radar_pol', 'HH+HV') 	#NISAR polariazation
+    ds_update.SetMetadataItem('source_radar_az_looks', "22")	# NISAR number of looks in azimuth
+    ds_update.SetMetadataItem('source_radar_range_looks', "5")	# NISAR Number of looks in range
+    ds_update.SetMetadataItem('source_radar_band', "L")	# NISAR radar band
+    ds_update.SetMetadataItem('source_radar_east_pixel_spacing', "20") #	NISAR east pixel spacing in meters
+    ds_update.SetMetadataItem('source_radar_look_look_direction', "B")	 # NISAR source data look Direction
+    ds_update.SetMetadataItem('source_radar_mode', "polsar")	 # NISAR source data radar mode
+    ds_update.SetMetadataItem('source_radar_nes0', "-30")	
+    ds_update.SetMetadataItem('source_radar_north_pixel_spacing', "100") #in meters		
+    ds_update.SetMetadataItem('source_radar_processing_facility', "NASA Jet Propulsion Laboratory") #Facility where the NISAR L2 products were processed
+    ds_update.SetMetadataItem('source_radar_nisar_granules_evaluation', GRANULE_LIST) #list of NISAR L2 products (full granule name) that were used for generating the L3 Science Product
+    ds_update.SetMetadataItem('source_radar_software_version', '83634531328a6b1fb3991f252a5c6d52b7a9ed4b')
+    ds_update.SetMetadataItem('source_radar_product_level', "L2") # The NISAR source data level used to generate the L3 Science Product
+    ds_update.SetMetadataItem('source_radar_software_version', '1.0') #Software version used to generate the NISAR source data
+    ds_update.SetMetadataItem('source_radar_satellite', 'NISAR') #	Name of the satellite
+
+    ds_update.SetMetadataItem('cal_20', '')
+    ds_update.SetMetadataItem('cal_10', '')
+    ds_update.SetMetadataItem('val_rmse', '')
+    ds_update.SetMetadataItem('val_r2', '') 
+    ds_update.SetMetadataItem('val_20', '') 
+    ds_update.SetMetadataItem('val_10', '') 
+    ds_update.SetMetadataItem('cal_val_note', '') 
+    
+     
+    print("Metadata successfully updated.")
+    
+    
+    
+    
+    # Optional: Set the Color Table on the memory dataset if you are using one
+    # tmp_ds.GetRasterBand(1).SetColorTable(ct)
+    
+    cog_driver = gdal.GetDriverByName("COG")
+    if cog_driver is None:
+        raise RuntimeError("COG driver not found. Check your GDAL version (requires 3.1+).")
+
+    try:
+        # Remove existing file if it exists to avoid lock errors
+        if os.path.exists(agb_name):
+            os.remove(agb_name)
+            
+        ds = cog_driver.CreateCopy(
+            agb_name,
+            ds_update,
+            strict=0,
+            options=[
+                "COMPRESS=LZW",
+                "PREDICTOR=YES",
+                "BLOCKSIZE=512",
+                "OVERVIEWS=AUTO" # Let the COG driver build the overviews here!
+                ]
+            )
+        
+        # Double check ds is not None before calling methods
+        if ds:
+            ds.FlushCache()
+            ds = None
+        else:
+            print("Failed to create COG dataset.")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+    finally:
+        ds_update = None
+        
+    
+    
+    
+    
+    print(f"Created True Value Raster: {agb_name}")
+
+    # 3. CREATE THE QML STYLE (Visuals)
+    # This XML tells QGIS: 0=Black, 1=Light Green, 100+=Dark Green
+    qml_content = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+    <qgis version="3.28.0">
+      <pipe>
+        <rasterrenderer type="singlebandpseudocolor" opacity="1" classificationMin="0" classificationMax="100" band="1">
+          <rastershader>
+            <colorrampshader colorRampType="INTERPOLATED" clip="0">
+              <item label="0 (None)" value="0" color="#000000" alpha="255"/>
+              <item label="1 (Low)" value="1" color="#f7fcf5" alpha="255"/>
+              <item label="50 (Med)" value="50" color="#74c476" alpha="255"/>
+              <item label="100 (High)" value="100" color="#00441b" alpha="255"/>
+              <item label=">100 (Overflow)" value="10000" color="#00441b" alpha="255"/>
+            </colorrampshader>
+          </rastershader>
+        </rasterrenderer>
+      </pipe>
+    </qgis>
+    """
+
+    with open(agb_name.replace('.tif', '.qml'), "w") as f:
+        f.write(qml_content)
+
+    
+    for k in range(len(SAR_RES_DATA_LIST) // 2):
         basename = os.path.basename(SAR_RES_DATA_LIST[k * 2])
         agb_name = f"{OUT_PREFIX}_agb_predictions_{basename[ab_range[0]:ab_range[1]]}.tif"
         print(agb_name)
-        array0 = in0.GetRasterBand(1).ReadAsArray()
-        array0[array0 > 0] = W_mean[:, k]
         try:
             os.remove(agb_name)
         except OSError:
             pass
-        driver = gdal.GetDriverByName("GTiff")
-        ds = driver.CreateCopy(
-            agb_name,
-            in0,
-            0,
-            ["COMPRESS=LZW", "PREDICTOR=2"],
-        )
-        ds.GetRasterBand(1).WriteArray(array0)
-        # ds.FlushCache()  # Write to disk.
-        ds = None
-        im = ax1[k].imshow(array0, cmap="gist_earth_r", vmin=np.quantile(W_mean, 0.01), vmax=np.quantile(W_mean, 0.99))
-        ax1[k].set_title(basename[ab_range[0]:ab_range[1]])
-        ax1[k].set_axis_off()
-    fig.subplots_adjust(right=0.85)
-    cbar_ax = fig.add_axes([0.88, 0.2, 0.03, 0.6])
-    cbar = fig.colorbar(im, cax=cbar_ax)
-    cbar.ax.set_ylabel("AGB (Mg/ha)")
 
-    # fig, ax = plt.subplots(
-    #     nrows=np.ceil(W_mean.shape[1] / 2).astype(int),
-    #     ncols=2, figsize=(9, 4 * np.ceil(W_mean.shape[1] / 2)),
-    #     sharex=True, sharey=True
-    # )
-    # ax1 = ax.flatten()
-    # for k in range(len(out_radar_list) // 2):
-    #     basename = os.path.basename(out_radar_list[k * 2])
-    #     agb_name = f"{out_name}_S_predictions_{basename[ab_range[0]:ab_range[1]]}.tif"
-    #     print(agb_name)
-    #     array0 = in0.GetRasterBand(1).ReadAsArray()
-    #     array0[array0 > 0] = S_mean[:, k]
-    #     try:
-    #         os.remove(agb_name)
-    #     except OSError:
-    #         pass
-    #     driver = gdal.GetDriverByName("GTiff")
-    #     ds = driver.CreateCopy(
-    #         agb_name,
-    #         in0,
-    #         0,
-    #         ["COMPRESS=LZW", "PREDICTOR=2"],
-    #     )
-    #     ds.GetRasterBand(1).WriteArray(array0)
-    #     ds.FlushCache()  # Write to disk.
-    #     ds = None
-    #     im = ax1[k].imshow(array0, cmap="gist_earth_r", vmin=np.quantile(S_mean, 0.01), vmax=np.quantile(S_mean, 0.99))
-    #     ax1[k].set_title(basename[ab_range[0]:ab_range[1]])
-    #     ax1[k].set_axis_off()
-    # fig.subplots_adjust(right=0.85)
-    # cbar_ax = fig.add_axes([0.88, 0.2, 0.03, 0.6])
-    # cbar = fig.colorbar(im, cax=cbar_ax)
-    # cbar.ax.set_ylabel("S Term")
+        array0 = in0.GetRasterBand(1).ReadAsArray()
+        array0[array0 > 0] = W_mean[:, k]
+        
+        # Force GDAL to show detailed errors in the console
+        gdal.UseExceptions()
+
+        mem_driver = gdal.GetDriverByName("MEM")
+        ds_update = mem_driver.Create("", in0.RasterXSize, in0.RasterYSize, 1, gdal.GDT_Float32)
+        ds_update.SetProjection(in0.GetProjection())
+        ds_update.SetGeoTransform(in0.GetGeoTransform())
+        ds_update.GetRasterBand(1).WriteArray(array0)
+
+
+        # Optional: Set the Color Table on the memory dataset if you are using one
+        # tmp_ds.GetRasterBand(1).SetColorTable(ct)
+        
+        cog_driver = gdal.GetDriverByName("COG")
+        if cog_driver is None:
+            raise RuntimeError("COG driver not found. Check your GDAL version (requires 3.1+).")
+
+        try:
+            # Remove existing file if it exists to avoid lock errors
+            if os.path.exists(agb_name):
+                os.remove(agb_name)
+                
+            ds = cog_driver.CreateCopy(
+                agb_name,
+                ds_update,
+                strict=0,
+                options=[
+                    "COMPRESS=LZW",
+                    "PREDICTOR=YES",
+                    "BLOCKSIZE=512",
+                    "OVERVIEWS=AUTO" # Let the COG driver build the overviews here!
+                    ]
+                )
+            
+            # Double check ds is not None before calling methods
+            if ds:
+                ds.FlushCache()
+                ds = None
+            else:
+                print("Failed to create COG dataset.")
+
+        except Exception as e:
+            print(f"An error occurred: {e}")
+
+        finally:
+            ds_update = None
+
+
+
 
     in0 = None
-
-    # return fig
-    
-    
